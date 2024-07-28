@@ -1,3 +1,9 @@
+use notify::{Event, RecursiveMode};
+use notify_debouncer_full::{
+    new_debouncer,
+    notify::{ReadDirectoryChangesWatcher, Watcher},
+    DebouncedEvent, Debouncer, FileIdMap,
+};
 use std::error::Error;
 use std::ops::Deref;
 use std::{
@@ -5,15 +11,7 @@ use std::{
     ops::DerefMut,
     path::{Path, PathBuf},
     rc::Rc,
-    time::{Duration}
-};
-use notify::{Event, RecursiveMode};
-use notify_debouncer_full::{new_debouncer, notify::{
-    ReadDirectoryChangesWatcher,
-    Watcher
-},
-DebouncedEvent,
- Debouncer, FileIdMap
+    time::Duration,
 };
 pub struct SyncedJsonStore<T>
 where
@@ -21,7 +19,7 @@ where
 {
     data: Rc<RefCell<T>>,
     path: PathBuf,
-    listener: Option<Debouncer<ReadDirectoryChangesWatcher, FileIdMap>>
+    listener: Option<Debouncer<ReadDirectoryChangesWatcher, FileIdMap>>,
 }
 
 fn write_data_to_file<T: serde::Serialize + for<'a> serde::Deserialize<'a>>(
@@ -42,7 +40,6 @@ fn write_data_to_file<T: serde::Serialize + for<'a> serde::Deserialize<'a>>(
 impl<T> SyncedJsonStore<T>
 where
     T: serde::Serialize + for<'a> serde::Deserialize<'a>,
-    
 {
     pub fn new(data: T, path: impl AsRef<Path>, overwrite: bool) -> Result<Self, std::io::Error> {
         let path = path.as_ref();
@@ -60,26 +57,39 @@ where
         Ok(Self {
             data: Rc::new(RefCell::new(data)),
             path: path.to_path_buf(),
-            listener: None
+            listener: None,
         })
     }
 
-    pub fn new_with_listener<F>(data: T, path: impl AsRef<Path>, overwrite: bool, mut callback: F) -> Result<Self, Box<dyn Error>>
-        where F: FnMut(&Event) + Send + 'static
-     {
+    pub fn new_with_listener<F>(
+        data: T,
+        path: impl AsRef<Path>,
+        overwrite: bool,
+        mut callback: F,
+    ) -> Result<Self, Box<dyn Error>>
+    where
+        F: FnMut(&Event) + Send + 'static,
+    {
         let mut self_ref = Self::new(data, path.as_ref(), overwrite)?;
 
         // init listener
-        let mut listener: Debouncer<ReadDirectoryChangesWatcher, FileIdMap> = new_debouncer(Duration::from_millis(500), None, move |result: Result<Vec<DebouncedEvent>, Vec<notify::Error>>| {
-            let events: Vec<DebouncedEvent> = result.unwrap_or_default();
-            events.iter().for_each(|event| {
-                callback(&event.event);
-            });
-        })?;
+        let mut listener: Debouncer<ReadDirectoryChangesWatcher, FileIdMap> = new_debouncer(
+            Duration::from_millis(500),
+            None,
+            move |result: Result<Vec<DebouncedEvent>, Vec<notify::Error>>| {
+                let events: Vec<DebouncedEvent> = result.unwrap_or_default();
+                events.iter().for_each(|event| {
+                    callback(&event.event);
+                });
+            },
+        )?;
 
-
-        listener.watcher().watch(path.as_ref(), RecursiveMode::NonRecursive)?;
-        listener.cache().add_root(path.as_ref(), RecursiveMode::NonRecursive);
+        listener
+            .watcher()
+            .watch(path.as_ref(), RecursiveMode::NonRecursive)?;
+        listener
+            .cache()
+            .add_root(path.as_ref(), RecursiveMode::NonRecursive);
         self_ref.listener = Some(listener);
         Ok(self_ref)
     }
@@ -92,7 +102,7 @@ where
         Ok(Self {
             data: Rc::new(RefCell::new(data)),
             path: path.to_path_buf(),
-            listener: None
+            listener: None,
         })
     }
 
@@ -184,11 +194,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
-    use std::thread::{self};
     use std::cell::Cell;
     use std::fs;
     use std::io::{BufWriter, Write};
+    use std::sync::{Arc, Mutex};
+    use std::thread::{self};
     #[test]
     fn test_new() {
         #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -210,26 +220,26 @@ mod tests {
     }
 
     #[test]
-    fn test_listen()  {
+    fn test_listen() {
         #[derive(serde::Serialize, serde::Deserialize, Clone)]
         struct TestStruct {
             data: i32,
-            string: String
+            string: String,
         }
-        let initial_data = TestStruct{
+        let initial_data = TestStruct {
             data: 100,
             string: "Hello!".to_string(),
         };
-        let path ="test_listen.json";
+        let path = "test_listen.json";
         let mut stuff: Arc<Mutex<i32>> = Arc::new(Mutex::new(0));
         let callback = {
-                let mut stuff = stuff.clone();
-                move |_event: &Event| {
-                    *stuff.clone().lock().unwrap() = 1;
-                }
+            let mut stuff = stuff.clone();
+            move |_event: &Event| {
+                *stuff.clone().lock().unwrap() = 1;
+            }
         };
         let store = SyncedJsonStore::new_with_listener(initial_data, path, true, callback).unwrap();
-        store.get_mut().data =  1337;
+        store.get_mut().data = 1337;
 
         // wait for debouncer
         thread::sleep(Duration::from_secs(1));
