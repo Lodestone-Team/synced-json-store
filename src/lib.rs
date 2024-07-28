@@ -1,3 +1,4 @@
+use std::error::Error;
 use std::ops::Deref;
 use std::{
     cell::{RefCell, RefMut},
@@ -41,6 +42,7 @@ fn write_data_to_file<T: serde::Serialize + for<'a> serde::Deserialize<'a>>(
 impl<T> SyncedJsonStore<T>
 where
     T: serde::Serialize + for<'a> serde::Deserialize<'a>,
+    
 {
     pub fn new(data: T, path: impl AsRef<Path>, overwrite: bool) -> Result<Self, std::io::Error> {
         let path = path.as_ref();
@@ -62,7 +64,9 @@ where
         })
     }
 
-    pub fn new_with_listener<F: FnMut(&Event) + Send + 'static>(data: T, path: impl AsRef<Path>, overwrite: bool, mut callback: F) -> Result<Self, std::io::Error> {
+    pub fn new_with_listener<F>(data: T, path: impl AsRef<Path>, overwrite: bool, mut callback: F) -> Result<Self, Box<dyn Error>>
+        where F: FnMut(&Event) + Send + 'static
+     {
         let mut self_ref = Self::new(data, path.as_ref(), overwrite)?;
 
         // init listener
@@ -71,10 +75,10 @@ where
             events.iter().for_each(|event| {
                 callback(&event.event);
             });
-        }).unwrap();
+        })?;
 
 
-        listener.watcher().watch(path.as_ref(), RecursiveMode::NonRecursive).unwrap();
+        listener.watcher().watch(path.as_ref(), RecursiveMode::NonRecursive)?;
         listener.cache().add_root(path.as_ref(), RecursiveMode::NonRecursive);
         self_ref.listener = Some(listener);
         Ok(self_ref)
@@ -180,7 +184,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
     use std::thread::{self};
+    use std::cell::Cell;
     use std::fs;
     use std::io::{BufWriter, Write};
     #[test]
@@ -215,16 +221,12 @@ mod tests {
             string: "Hello!".to_string(),
         };
         let path ="test_listen.json";
-        let callback = |_event: &Event| {
-            let new_path = "test_callback.json";
-            let new_data = TestStruct{
-                data: 44,
-                string: "New file!".to_string(),
-            };
-            let new_file = fs::File::create(new_path).unwrap();
-            let mut writer = BufWriter::new(new_file);
-            serde_json::to_writer(&mut writer, &new_data).unwrap();
-            writer.flush().unwrap();
+        let mut stuff: Arc<Mutex<i32>> = Arc::new(Mutex::new(0));
+        let callback = {
+                let mut stuff = stuff.clone();
+                move |_event: &Event| {
+                    *stuff.clone().lock().unwrap() = 1;
+                }
         };
         let store = SyncedJsonStore::new_with_listener(initial_data, path, true, callback).unwrap();
         store.get_mut().data =  1337;
@@ -232,13 +234,8 @@ mod tests {
         // wait for debouncer
         thread::sleep(Duration::from_secs(1));
 
-        let new_path = "test_callback.json";
-        let new_file = fs::File::open(new_path).unwrap();
-        let new_data: TestStruct = serde_json::from_reader(new_file).unwrap();
-        assert_eq!(new_data.data, 44);
-        assert_eq!(new_data.string, "New file!".to_string());
+        assert_eq!(stuff.lock().unwrap().clone(), 1);
 
         std::fs::remove_file(path).unwrap();
-        std::fs::remove_file(new_path).unwrap();
     }
 }
