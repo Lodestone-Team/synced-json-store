@@ -4,6 +4,15 @@ use std::{
     ops::DerefMut,
     path::{Path, PathBuf},
     rc::Rc,
+    time::{Duration}
+};
+use notify::{Event, RecursiveMode};
+use notify_debouncer_full::{new_debouncer, notify::{
+    ReadDirectoryChangesWatcher,
+    Watcher
+},
+DebouncedEvent,
+ Debouncer, FileIdMap
 };
 pub struct SyncedJsonStore<T>
 where
@@ -11,6 +20,7 @@ where
 {
     data: Rc<RefCell<T>>,
     path: PathBuf,
+    listener: Option<Debouncer<ReadDirectoryChangesWatcher, FileIdMap>>
 }
 
 fn write_data_to_file<T: serde::Serialize + for<'a> serde::Deserialize<'a>>(
@@ -48,7 +58,26 @@ where
         Ok(Self {
             data: Rc::new(RefCell::new(data)),
             path: path.to_path_buf(),
+            listener: None
         })
+    }
+
+    pub fn new_with_listener<F: FnMut(&Event) + Send + 'static>(data: T, path: impl AsRef<Path>, overwrite: bool, mut callback: F) -> Result<Self, std::io::Error> {
+        let mut self_ref = Self::new(data, path.as_ref(), overwrite)?;
+
+        // init listener
+        let mut listener: Debouncer<ReadDirectoryChangesWatcher, FileIdMap> = new_debouncer(Duration::from_millis(500), None, move |result: Result<Vec<DebouncedEvent>, Vec<notify::Error>>| {
+            let events: Vec<DebouncedEvent> = result.unwrap_or_default();
+            events.iter().for_each(|event| {
+                callback(&event.event);
+            });
+        }).unwrap();
+
+
+        listener.watcher().watch(path.as_ref(), RecursiveMode::NonRecursive).unwrap();
+        listener.cache().add_root(path.as_ref(), RecursiveMode::NonRecursive);
+        self_ref.listener = Some(listener);
+        Ok(self_ref)
     }
 
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
@@ -59,6 +88,7 @@ where
         Ok(Self {
             data: Rc::new(RefCell::new(data)),
             path: path.to_path_buf(),
+            listener: None
         })
     }
 
@@ -150,7 +180,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread::{self};
     use std::fs;
+    use std::io::{BufWriter, Write};
     #[test]
     fn test_new() {
         #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -169,5 +201,44 @@ mod tests {
         let data: TestStruct = serde_json::from_reader(file).unwrap();
         assert_eq!(data.data, 43);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_listen()  {
+        #[derive(serde::Serialize, serde::Deserialize, Clone)]
+        struct TestStruct {
+            data: i32,
+            string: String
+        }
+        let initial_data = TestStruct{
+            data: 100,
+            string: "Hello!".to_string(),
+        };
+        let path ="test_listen.json";
+        let callback = |_event: &Event| {
+            let new_path = "test_callback.json";
+            let new_data = TestStruct{
+                data: 44,
+                string: "New file!".to_string(),
+            };
+            let new_file = fs::File::create(new_path).unwrap();
+            let mut writer = BufWriter::new(new_file);
+            serde_json::to_writer(&mut writer, &new_data).unwrap();
+            writer.flush().unwrap();
+        };
+        let store = SyncedJsonStore::new_with_listener(initial_data, path, true, callback).unwrap();
+        store.get_mut().data =  1337;
+
+        // wait for debouncer
+        thread::sleep(Duration::from_secs(1));
+
+        let new_path = "test_callback.json";
+        let new_file = fs::File::open(new_path).unwrap();
+        let new_data: TestStruct = serde_json::from_reader(new_file).unwrap();
+        assert_eq!(new_data.data, 44);
+        assert_eq!(new_data.string, "New file!".to_string());
+
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(new_path).unwrap();
     }
 }

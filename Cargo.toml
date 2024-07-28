@@ -8,3 +8,5 @@ license = "MIT"
 [dependencies]
 serde = { version = "1.0.204", features = ["derive"] }
 serde_json = "1.0.120"
+notify-debouncer-full = "0.3.1"
+notify = "6.1.1"
