@@ -27,7 +27,6 @@ where
 {
     data: Rc<RefCell<T>>,
     path: PathBuf,
-    listener: Option<Debouncer<ReadDirectoryChangesWatcher, FileIdMap>>,
 }
 
 fn write_data_to_file<T: serde::Serialize + for<'a> serde::Deserialize<'a>>(
@@ -65,41 +64,7 @@ where
         Ok(Self {
             data: Rc::new(RefCell::new(data)),
             path: path.to_path_buf(),
-            listener: None,
         })
-    }
-
-    pub fn new_with_listener<F>(
-        data: T,
-        path: impl AsRef<Path>,
-        overwrite: bool,
-        mut callback: F,
-    ) -> Result<Self, Box<dyn Error>>
-    where
-        F: FnMut(&Event) + Send + 'static,
-    {
-        let mut self_ref = Self::new(data, path.as_ref(), overwrite)?;
-
-        // init listener
-        let mut listener: Debouncer<ReadDirectoryChangesWatcher, FileIdMap> = new_debouncer(
-            Duration::from_millis(200),
-            None,
-            move |result: Result<Vec<DebouncedEvent>, Vec<notify::Error>>| {
-                let events: Vec<DebouncedEvent> = result.unwrap_or_default();
-                events.iter().for_each(|event| {
-                    callback(&event.event);
-                });
-            },
-        )?;
-
-        listener
-            .watcher()
-            .watch(path.as_ref(), RecursiveMode::NonRecursive)?;
-        listener
-            .cache()
-            .add_root(path.as_ref(), RecursiveMode::NonRecursive);
-        self_ref.listener = Some(listener);
-        Ok(self_ref)
     }
 
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
@@ -110,7 +75,6 @@ where
         Ok(Self {
             data: Rc::new(RefCell::new(data)),
             path: path.to_path_buf(),
-            listener: None,
         })
     }
 
@@ -363,10 +327,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
     use std::fs::{self, File};
-    use std::io::{BufWriter, Write};
-    use std::sync::{Arc, Mutex};
     use std::thread::{self};
     #[test]
     fn test_new() {
@@ -385,36 +346,6 @@ mod tests {
         let file = fs::File::open(path).unwrap();
         let data: TestStruct = serde_json::from_reader(file).unwrap();
         assert_eq!(data.data, 43);
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn test_listen() {
-        #[derive(serde::Serialize, serde::Deserialize, Clone)]
-        struct TestStruct {
-            data: i32,
-            string: String,
-        }
-        let initial_data = TestStruct {
-            data: 100,
-            string: "Hello!".to_string(),
-        };
-        let path = "test_listen.json";
-        let mut stuff: Arc<Mutex<i32>> = Arc::new(Mutex::new(0));
-        let callback = {
-            let mut stuff = stuff.clone();
-            move |_event: &Event| {
-                *stuff.clone().lock().unwrap() = 1;
-            }
-        };
-        let store = SyncedJsonStore::new_with_listener(initial_data, path, true, callback).unwrap();
-        store.get_mut().data = 1337;
-
-        // wait for debouncer
-        thread::sleep(Duration::from_secs(1));
-
-        assert_eq!(stuff.lock().unwrap().clone(), 1);
-
         std::fs::remove_file(path).unwrap();
     }
 
@@ -439,7 +370,7 @@ mod tests {
         });
         thread::sleep(Duration::from_millis(1000));
 
-        let mut file = File::open(path).unwrap();
+        let file = File::open(path).unwrap();
         let data: TestStruct = serde_json::from_reader(&file).unwrap();
         assert_eq!(data.data, 4);
 
